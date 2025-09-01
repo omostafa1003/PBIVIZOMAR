@@ -9,6 +9,10 @@ import IVisualHost = powerbi.extensibility.visual.IVisualHost;
 import FilterAction = powerbi.FilterAction;
 
 import * as models from "powerbi-models";
+// Use the vendor parser (CommonJS) and our flexible filter builder
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const parser: any = require('./vendor/queryParser');
+import { buildFlexibleFilters } from './flexibleFilter';
 
 interface SearchSettings {
     placeholder?: string;
@@ -19,10 +23,13 @@ export class Visual implements IVisual {
     private host: IVisualHost;
     private inputEl: HTMLInputElement;
     private clearBtn: HTMLButtonElement;
-    private filterView: HTMLPreElement;
+    private filterView: HTMLTextAreaElement;
+    private copyFilterBtn: HTMLButtonElement;
+    private toggleFilterBtn: HTMLButtonElement;
     private logArea: HTMLTextAreaElement;
     private copyLogBtn: HTMLButtonElement;
     private clearLogBtn: HTMLButtonElement;
+    private filterResizer?: HTMLDivElement;
     private logs: string[] = [];
     private currentFilter?: models.IBasicFilter;
     private categoryColumnQueryRef?: string;
@@ -52,14 +59,38 @@ export class Visual implements IVisual {
     // Filter JSON display
     const filterSection = document.createElement("div");
     filterSection.className = "filter-section";
-    const filterTitle = document.createElement("div");
-    filterTitle.className = "section-title";
-    filterTitle.textContent = "Applied filter JSON:";
-    this.filterView = document.createElement("pre");
-    this.filterView.className = "filter-json";
-    this.filterView.textContent = "(none)";
-    filterSection.appendChild(filterTitle);
+    // Header with title and copy action, matching log section layout
+    const filterHeader = document.createElement("div");
+    filterHeader.className = "section-title with-action";
+    const filterTitleSpan = document.createElement("span");
+    filterTitleSpan.textContent = "Applied filter JSON";
+    // Expand/Collapse toggle
+    this.toggleFilterBtn = document.createElement("button");
+    this.toggleFilterBtn.type = "button";
+    this.toggleFilterBtn.className = "toggle-section";
+    this.toggleFilterBtn.textContent = "Collapse";
+    this.toggleFilterBtn.addEventListener("click", () => this.toggleSection(filterSection, this.toggleFilterBtn));
+    // Add copy button for the JSON
+    this.copyFilterBtn = document.createElement("button");
+    this.copyFilterBtn.type = "button";
+    this.copyFilterBtn.textContent = "Copy JSON";
+    this.copyFilterBtn.className = "copy-json";
+    this.copyFilterBtn.addEventListener("click", this.onCopyFilterJson);
+    filterHeader.appendChild(filterTitleSpan);
+    filterHeader.appendChild(this.toggleFilterBtn);
+    filterHeader.appendChild(this.copyFilterBtn);
+    // Use a resizable textarea so the user can control height and scroll independently
+    this.filterView = document.createElement("textarea");
+    this.filterView.className = "filter-area";
+    this.filterView.readOnly = true;
+    this.filterView.value = "(none)";
+    // Add a custom resizer to guarantee resizing even if host CSS limits native handles
+    this.filterResizer = document.createElement("div");
+    this.filterResizer.className = "filter-resizer";
+    this.attachVerticalResizer(this.filterResizer, this.filterView, 60);
+    filterSection.appendChild(filterHeader);
     filterSection.appendChild(this.filterView);
+    filterSection.appendChild(this.filterResizer);
 
     // Log area with copy button
     const logSection = document.createElement("div");
@@ -68,6 +99,11 @@ export class Visual implements IVisual {
     logHeader.className = "section-title with-action";
     const logTitle = document.createElement("span");
     logTitle.textContent = "Log";
+    const toggleLogBtn = document.createElement("button");
+    toggleLogBtn.type = "button";
+    toggleLogBtn.className = "toggle-section";
+    toggleLogBtn.textContent = "Collapse";
+    toggleLogBtn.addEventListener("click", () => this.toggleSection(logSection, toggleLogBtn));
     this.copyLogBtn = document.createElement("button");
     this.copyLogBtn.type = "button";
     this.copyLogBtn.textContent = "Copy Log";
@@ -79,12 +115,16 @@ export class Visual implements IVisual {
     this.clearLogBtn.className = "clear-log";
     this.clearLogBtn.addEventListener("click", this.onClearLog);
     logHeader.appendChild(logTitle);
+    logHeader.appendChild(toggleLogBtn);
     logHeader.appendChild(this.copyLogBtn);
     logHeader.appendChild(this.clearLogBtn);
     this.logArea = document.createElement("textarea");
     this.logArea.className = "log-area";
     this.logArea.readOnly = true;
     this.logArea.value = "";
+    // Disable internal scroll; outer container will scroll
+    this.logArea.style.overflow = 'hidden';
+    this.logArea.style.resize = 'none';
     logSection.appendChild(logHeader);
     logSection.appendChild(this.logArea);
 
@@ -97,8 +137,8 @@ export class Visual implements IVisual {
     }
 
     private onSearchChange = (ev: Event) => {
-        const query = (ev.target as HTMLInputElement).value || "";
-        this.applyFilter(query);
+    const query = (ev.target as HTMLInputElement).value || "";
+    this.applyFilter(query);
     };
 
     private onClearClick = () => {
@@ -119,6 +159,23 @@ export class Visual implements IVisual {
             }
         } catch (e) {
             this.log("Failed to copy log", e);
+        }
+    };
+
+    private onCopyFilterJson = async () => {
+        try {
+            const text = this.filterView.value || "";
+            if (navigator && (navigator as any).clipboard && (navigator as any).clipboard.writeText) {
+                await (navigator as any).clipboard.writeText(text);
+                this.log("Filter JSON copied to clipboard");
+            } else {
+                // Fallback: select the text so user can manually copy
+                this.filterView.focus();
+                this.filterView.select();
+                this.log("Clipboard API unavailable; filter JSON selected for manual copy");
+            }
+        } catch (e) {
+            this.log("Failed to copy filter JSON", e);
         }
     };
 
@@ -157,12 +214,25 @@ export class Visual implements IVisual {
         }
 
         if (query.trim().length > 0) {
-            // Use AdvancedFilter for true contains match on the bound column
-            const adv = new models.AdvancedFilter(this.filterTarget, "And", [{ operator: "Contains", value: query }]);
-            const json = adv.toJSON();
-            this.host.applyJsonFilter(json, "general", "filter", FilterAction.merge);
-            this.updateFilterView(json);
-            this.log("Applied filter", json);
+            try {
+                // Parse with flexible parser and build one or many filters for the bound column
+                const parsed = parser.parseQuery(query);
+                const target = this.filterTarget as any as { table: string; column: string };
+                const filter = buildFlexibleFilters(parsed, target);
+                // Clear any existing filters first, then apply one or many
+                this.host.applyJsonFilter(null, "general", "filter", FilterAction.remove);
+                if (Array.isArray(filter)) {
+                    for (const f of filter) {
+                        this.host.applyJsonFilter(f as any, "general", "filter", FilterAction.merge);
+                    }
+                } else {
+                    this.host.applyJsonFilter(filter as any, "general", "filter", FilterAction.merge);
+                }
+                this.updateFilterView(filter);
+                this.log("Applied filter", filter);
+            } catch (e) {
+                this.log("Failed to parse/build filter", e);
+            }
             return;
         } else {
             // Clear filter
@@ -194,13 +264,13 @@ export class Visual implements IVisual {
 
     private updateFilterView(json: any | null) {
         if (!json) {
-            this.filterView.textContent = "(none)";
+            this.filterView.value = "(none)";
             return;
         }
         try {
-            this.filterView.textContent = JSON.stringify(json, null, 2);
+            this.filterView.value = JSON.stringify(json, null, 2);
         } catch {
-            this.filterView.textContent = String(json);
+            this.filterView.value = String(json);
         }
     }
 
@@ -221,7 +291,46 @@ export class Visual implements IVisual {
         }
         this.logArea.value = this.logs.join("\n\n");
         // Scroll to bottom
-        this.logArea.scrollTop = this.logArea.scrollHeight;
+    // keep focus behavior but no internal scroll management
+    }
+
+    // Optional: keep function in case we want to re-enable autosizing later
+    private autosizeLog() { /* no-op: outer container scrolls */ }
+
+    private toggleSection(sectionEl: HTMLElement, btn: HTMLButtonElement) {
+        const isCollapsed = sectionEl.classList.toggle('collapsed');
+        btn.textContent = isCollapsed ? 'Expand' : 'Collapse';
+    }
+
+    private attachVerticalResizer(handle: HTMLDivElement, targetEl: HTMLElement, minHeightPx = 60, maxHeightPx?: number) {
+        let startY = 0;
+        let startH = 0;
+        const onMouseMove = (e: MouseEvent) => {
+            const dy = e.clientY - startY;
+            let newH = startH + dy;
+            if (minHeightPx) newH = Math.max(minHeightPx, newH);
+            if (maxHeightPx) newH = Math.min(maxHeightPx, newH);
+            (targetEl as HTMLElement).style.height = newH + 'px';
+        };
+        const onMouseUp = () => {
+            window.removeEventListener('mousemove', onMouseMove);
+            window.removeEventListener('mouseup', onMouseUp);
+        };
+        handle.addEventListener('mousedown', (e: MouseEvent) => {
+            e.preventDefault();
+            startY = e.clientY;
+            const cs = window.getComputedStyle(targetEl);
+            startH = parseInt(cs.height, 10) || (targetEl as HTMLElement).offsetHeight;
+            // Set an explicit height so dragging has effect
+            (targetEl as HTMLElement).style.height = startH + 'px';
+            // Use container height as max if not provided
+            if (!maxHeightPx) {
+                const container = this.target as HTMLElement;
+                maxHeightPx = Math.max(120, container.clientHeight - 40);
+            }
+            window.addEventListener('mousemove', onMouseMove);
+            window.addEventListener('mouseup', onMouseUp);
+        });
     }
 
     public enumerateObjectInstances(options: powerbi.EnumerateVisualObjectInstancesOptions): VisualObjectInstanceEnumeration {

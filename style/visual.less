@@ -4,6 +4,10 @@
   display: flex;
   gap: 6px;
   flex-direction: column;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  overflow-y: auto; // Single scrollbar for the entire visual
 }
 
 .visual-container .controls {
@@ -45,26 +49,81 @@
   justify-content: space-between;
   gap: 6px;
 }
+.visual-container .filter-section {
+  display: flex;
+  flex-direction: column;
+}
+
+.visual-container .filter-resizer {
+  height: 8px;
+  cursor: ns-resize;
+  background: transparent;
+  margin-top: 2px;
+  position: relative;
+}
+
+.visual-container .filter-resizer::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 36px;
+  height: 3px;
+  background: #ccc;
+  border-radius: 2px;
+  top: 2px;
+}
 
 .visual-container .filter-json {
   padding: 8px;
   background: #fafafa;
   border: 1px solid #e5e5e5;
   border-radius: 3px;
-  max-height: 120px;
-  overflow: auto;
+  width: 100%;
+  overflow: visible; // let parent container handle scrolling
+  white-space: pre-wrap; // wrap long JSON lines
+  word-break: break-word; // prevent horizontal overflow on long tokens
   font-size: 11px;
   margin: 4px 0 8px 0;
 }
 
+/* Resizable filter area - user can change height and scroll internally */
+.visual-container .filter-area {
+  width: 100%;
+  min-height: 80px;
+  resize: none; /* no internal resize; outer container scrolls */
+  overflow: hidden; /* avoid internal scroll */
+  padding: 8px;
+  background: #fafafa;
+  border: 1px solid #e5e5e5;
+  border-radius: 3px;
+  font-family: Consolas, monospace;
+  font-size: 11px;
+  box-sizing: border-box;
+  white-space: pre; /* preserve JSON formatting */
+}
+
 .visual-container .log-area {
   width: 100%;
-  min-height: 120px;
-  resize: vertical;
+  min-height: 80px;
+  resize: none; /* no internal resize; outer container scrolls */
+  overflow: hidden; /* avoid internal scroll */
   padding: 8px;
   border: 1px solid #e5e5e5;
   border-radius: 3px;
   font-family: Consolas, monospace;
   font-size: 11px;
   box-sizing: border-box;
+}
+
+/* Collapsible sections */
+.visual-container .filter-section.collapsed .filter-area,
+.visual-container .filter-section.collapsed .filter-resizer {
+  display: none;
+}
+
+.visual-container .log-section.collapsed .log-area,
+.visual-container .log-section.collapsed .clear-log,
+.visual-container .log-section.collapsed .copy-log {
+  display: none;
 }
