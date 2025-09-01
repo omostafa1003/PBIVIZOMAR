@@ -1,13 +1,70 @@
 .visual-container {
   font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
   padding: 6px;
+  display: flex;
+  gap: 6px;
+  flex-direction: column;
+}
+
+.visual-container .controls {
+  display: flex;
+  gap: 6px;
 }
 
 .visual-container input[type="text"] {
-  width: 100%;
+  flex: 1;
   padding: 6px 8px;
   font-size: 12px;
   border: 1px solid #ccc;
   border-radius: 3px;
+  box-sizing: border-box;
+}
+
+.visual-container button {
+  padding: 6px 10px;
+  font-size: 12px;
+  border: 1px solid #ccc;
+  background: #f7f7f7;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.visual-container button:hover {
+  background: #eee;
+}
+
+.visual-container .section-title {
+  font-weight: 600;
+  font-size: 12px;
+  color: #444;
+}
+
+.visual-container .section-title.with-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.visual-container .filter-json {
+  padding: 8px;
+  background: #fafafa;
+  border: 1px solid #e5e5e5;
+  border-radius: 3px;
+  max-height: 120px;
+  overflow: auto;
+  font-size: 11px;
+  margin: 4px 0 8px 0;
+}
+
+.visual-container .log-area {
+  width: 100%;
+  min-height: 120px;
+  resize: vertical;
+  padding: 8px;
+  border: 1px solid #e5e5e5;
+  border-radius: 3px;
+  font-family: Consolas, monospace;
+  font-size: 11px;
   box-sizing: border-box;
 }
