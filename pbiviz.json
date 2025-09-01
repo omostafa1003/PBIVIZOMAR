@@ -1,0 +1,24 @@
+{
+  "visual": {
+    "name": "SearchQueryVisual",
+    "displayName": "Search Query Visual",
+    "guid": "SearchQueryVisual12345",
+    "visualClassName": "Visual",
+  "version": "0.1.0.0",
+    "description": "A simple visual that filters a single bound column using a user search query.",
+    "supportUrl": "https://github.com/microsoft/powerbi-models",
+    "gitHubUrl": "https://github.com/microsoft/powerbi-models"
+  },
+  "apiVersion": "5.6.0",
+  "author": {
+  "name": "Your Name",
+  "email": "your-email@example.com"
+  },
+  "assets": {
+  "icon": "node_modules/powerbi-visuals-webpack-plugin/templates/icon.png"
+  },
+  "externalJS": [],
+  "style": "style/visual.less",
+  "capabilities": "capabilities.json",
+  "stringResources": []
+}
