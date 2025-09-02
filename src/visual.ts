@@ -22,9 +22,10 @@ export class Visual implements IVisual {
     private target: HTMLElement;
     private host: IVisualHost;
     private inputEl: HTMLInputElement;
-    private clearBtn: HTMLButtonElement;
+    private clearBtn: HTMLButtonElement; // deprecated UI; keep reference but not rendered
+    private inputClearBtn?: HTMLButtonElement;
     private chipsContainer?: HTMLDivElement;
-    private chips: { id: string; raw: string; parsed: any; display: string }[] = [];
+    private chips: { id: string; raw: string; parsed: any; display: string; color?: string }[] = [];
     private filterView: HTMLTextAreaElement;
     private copyFilterBtn: HTMLButtonElement;
     private toggleFilterBtn: HTMLButtonElement;
@@ -44,7 +45,7 @@ export class Visual implements IVisual {
     this.target.className = "visual-container";
     this.inputEl = document.createElement("input");
         this.inputEl.type = "text";
-        this.inputEl.placeholder = "Type to search...";
+        this.inputEl.placeholder = "Enter keyword and press Enter";
         this.inputEl.addEventListener("input", this.onSearchChange);
         // Add on Enter: add as chip
         this.inputEl.addEventListener("keydown", (e: KeyboardEvent) => {
@@ -58,16 +59,23 @@ export class Visual implements IVisual {
             }
         });
     this.clearBtn = document.createElement("button");
-    this.clearBtn.type = "button";
-    this.clearBtn.textContent = "Clear";
-    this.clearBtn.title = "Clear search";
-    this.clearBtn.addEventListener("click", this.onClearClick);
+    // Not appended anymore; replaced by inline X button
 
     // Controls row
     const controls = document.createElement("div");
     controls.className = "controls";
-    controls.appendChild(this.inputEl);
-    controls.appendChild(this.clearBtn);
+    // Wrap input to position inline X button
+    const inputWrap = document.createElement("div");
+    inputWrap.className = "input-wrap";
+    inputWrap.appendChild(this.inputEl);
+    this.inputClearBtn = document.createElement("button");
+    this.inputClearBtn.type = "button";
+    this.inputClearBtn.className = "input-clear";
+    this.inputClearBtn.title = "Clear all queries";
+    this.inputClearBtn.innerHTML = "&times;";
+    this.inputClearBtn.addEventListener("click", this.onClearClick);
+    inputWrap.appendChild(this.inputClearBtn);
+    controls.appendChild(inputWrap);
 
     // Chips area under input
     const chipsSection = document.createElement("div");
@@ -221,7 +229,7 @@ export class Visual implements IVisual {
         const objects = dataView.metadata && dataView.metadata.objects as any;
         if (objects && objects.search && objects.search.placeholder) {
             this.settings.placeholder = objects.search.placeholder as string;
-            this.inputEl.placeholder = this.settings.placeholder || "Type to search...";
+            this.inputEl.placeholder = this.settings.placeholder || "Enter keyword and press Enter";
         }
 
         // Capture the bound category queryName to build a filter target
@@ -282,7 +290,12 @@ export class Visual implements IVisual {
             const parsed = parser.parseQuery(raw);
             const display = raw;
             const id = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
-            this.chips.push({ id, raw, parsed, display });
+            // Assign a color class cycling through presets
+            const palette = [
+                '#e7f0ff', '#e8f7e7', '#fff4e6', '#f3e8ff', '#e6f9ff', '#ffe8ef'
+            ];
+            const color = palette[this.chips.length % palette.length];
+            this.chips.push({ id, raw, parsed, display, color });
             this.renderChips();
             this.applyChipsFilters();
         } catch (err) {
@@ -320,6 +333,10 @@ export class Visual implements IVisual {
         for (const c of this.chips) {
             const chipEl = document.createElement('span');
             chipEl.className = 'chip';
+            if (c.color) {
+                chipEl.style.background = c.color;
+                chipEl.style.borderColor = c.color;
+            }
             chipEl.title = c.raw;
             const label = document.createElement('span');
             label.className = 'chip-label';
