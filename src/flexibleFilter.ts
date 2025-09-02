@@ -37,63 +37,93 @@ function flattenAtoms(node: Node): Condition[] {
 }
 
 export function buildFlexibleFilters(parsed: ParsedQuery, target: TargetRef): models.IFilter | models.IFilter[] {
-  // Strategy: merge all AND atoms into one And filter; emit separate Or filters for each OR sub-group.
-  const andAtoms: Condition[] = [];
-  const orGroups: Condition[][] = [];
-
-  const walk = (node: Node, parentOp: Logical | null) => {
-    if (!isParsedQuery(node)) {
-      if (parentOp === 'Or') {
-        orGroups.push([node]);
-      } else {
-        andAtoms.push(node);
-      }
-      return;
-    }
-
-    const op = node.logicalOperator;
-    if (op === 'Or') {
-      // Collect all atoms under this OR subtree into one group
-      const atoms = flattenAtoms(node);
-      if (atoms.length > 0) {
-        orGroups.push(atoms);
-      }
-      return;
-    }
-
-    // AND: walk children preserving grouping behavior
-    for (const c of node.conditions) {
-      walk(c, op);
-    }
-  };
-
-  walk(parsed, null);
-
+  // Convert the expression into Conjunctive Normal Form (CNF): AND of OR-clauses
+  const clauses = toCNF(parsed);
   const targetRef: models.IFilterTarget = { table: target.table, column: target.column } as any;
   const filters: models.IFilter[] = [];
 
-  if (andAtoms.length > 0) {
-    const conditions = andAtoms.map(toAdvancedCondition);
-    const adv = new models.AdvancedFilter(targetRef, 'And', conditions);
-    filters.push(adv.toJSON());
+  // Optimization: if every clause is a single term (pure AND of terms), collapse into one Advanced AND filter
+  if (clauses.length > 1 && clauses.every(c => c.length === 1)) {
+    const allConds = clauses.flat().map(toAdvancedCondition);
+    return makeAdvanced(targetRef, 'And', allConds);
   }
 
-  for (const group of orGroups) {
-    if (canUseBasicIn(group)) {
-      const values = group.map(v => toBasicValue(v));
-      const basic = new models.BasicFilter(targetRef as any, 'In', values as any);
-      filters.push(basic.toJSON());
-    } else {
-      const conditions = group.map(toAdvancedCondition);
-      const adv = new models.AdvancedFilter(targetRef, 'Or', conditions);
-      filters.push(adv.toJSON());
+  // If mixed: some OR-clauses (size>1) and some singletons, merge all singletons into one AND filter
+  const singles = clauses.filter(c => c.length === 1).flat();
+  const multis = clauses.filter(c => c.length > 1);
+  if (singles.length && multis.length) {
+    filters.push(makeAdvanced(targetRef, 'And', singles.map(toAdvancedCondition)));
+    for (const clause of multis) {
+      if (canUseBasicIn(clause)) {
+        const values = clause.map(v => toBasicValue(v));
+        const basic = new models.BasicFilter(targetRef as any, 'In', values as any);
+        filters.push(basic.toJSON());
+      } else {
+        const conditions = clause.map(toAdvancedCondition);
+        filters.push(makeAdvanced(targetRef, 'Or', conditions));
+      }
+    }
+    return filters.length === 1 ? filters[0] : filters;
+  }
+
+  for (const clause of clauses) {
+    if (clause.length > 1) {
+      // Multi-term clause => OR within clause
+      if (canUseBasicIn(clause)) {
+        const values = clause.map(v => toBasicValue(v));
+        const basic = new models.BasicFilter(targetRef as any, 'In', values as any);
+        filters.push(basic.toJSON());
+      } else {
+        const conditions = clause.map(toAdvancedCondition);
+        filters.push(makeAdvanced(targetRef, 'Or', conditions));
+      }
+    } else if (clause.length === 1) {
+      // Single-term clause => simple AND against others
+      const conditions = clause.map(toAdvancedCondition);
+      filters.push(makeAdvanced(targetRef, 'And', conditions));
     }
   }
 
-  if (filters.length === 1) {
-    return filters[0];
+  return filters.length === 1 ? filters[0] : filters;
+}
+
+// Convert the parsed tree to CNF: list of clauses (each clause is OR over conditions)
+function toCNF(node: Node): Condition[][] {
+  if (!isParsedQuery(node)) {
+    return [[node]];
   }
-  return filters;
+  if (node.logicalOperator === 'And') {
+    // AND => concatenate clauses from children
+    let result: Condition[][] = [];
+    for (const child of node.conditions) {
+      const childCNF = toCNF(child);
+      result = result.concat(childCNF);
+    }
+    return result;
+  } else {
+    // OR => distribute over children's CNF
+    let result: Condition[][] = [];
+    for (let i = 0; i < node.conditions.length; i++) {
+      const childCNF = toCNF(node.conditions[i]);
+      if (i === 0) {
+        result = childCNF;
+      } else {
+        result = distributeOr(result, childCNF);
+      }
+    }
+    return result;
+  }
+}
+
+// Distribute OR over AND: given two CNFs (lists of clauses), return cross-product union of clauses
+function distributeOr(cnfA: Condition[][], cnfB: Condition[][]): Condition[][] {
+  const out: Condition[][] = [];
+  for (const clauseA of cnfA) {
+    for (const clauseB of cnfB) {
+      out.push([...clauseA, ...clauseB]);
+    }
+  }
+  return out;
 }
 
 function toAdvancedCondition(c: Condition): models.IAdvancedFilterCondition {
@@ -103,17 +133,10 @@ function toAdvancedCondition(c: Condition): models.IAdvancedFilterCondition {
 }
 
 function canUseBasicIn(group: Condition[]): boolean {
-  // Use Basic 'In' only if:
-  // - All terms are included (not excluded)
-  // - No required modifiers (we can't express +term in equality list)
-  // - Group is an OR-like list of equality candidates
-  // Equality candidates: quoted strings (exact) OR numeric-like tokens
   if (!group.length) return false;
-  for (const c of group) {
-    if (c.isExcluded || c.isRequired) return false;
-    if (!(c.isQuoted || isNumericString(c.value))) return false;
-  }
-  return true;
+  // Only allow Basic In for purely numeric lists without modifiers.
+  if (group.some(c => c.isExcluded || c.isRequired)) return false;
+  return group.every(c => isNumericString(c.value));
 }
 
 function isNumericString(s: string): boolean {
@@ -128,4 +151,14 @@ function toBasicValue(c: Condition): string | number {
     return Number.isNaN(num) ? c.value : num;
   }
   return c.value;
+}
+
+function makeAdvanced(target: models.IFilterTarget, logical: 'And' | 'Or', conditions: models.IAdvancedFilterCondition[]): models.IAdvancedFilter {
+  return {
+    $schema: "http://powerbi.com/product/schema#advanced",
+    target,
+    filterType: models.FilterType.Advanced,
+    logicalOperator: logical,
+    conditions
+  } as models.IAdvancedFilter;
 }

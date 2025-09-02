@@ -219,15 +219,9 @@ export class Visual implements IVisual {
                 const parsed = parser.parseQuery(query);
                 const target = this.filterTarget as any as { table: string; column: string };
                 const filter = buildFlexibleFilters(parsed, target);
-                // Clear any existing filters first, then apply one or many
+                // Clear previous filters, then apply the entire set in one merge to preserve AND across groups
                 this.host.applyJsonFilter(null, "general", "filter", FilterAction.remove);
-                if (Array.isArray(filter)) {
-                    for (const f of filter) {
-                        this.host.applyJsonFilter(f as any, "general", "filter", FilterAction.merge);
-                    }
-                } else {
-                    this.host.applyJsonFilter(filter as any, "general", "filter", FilterAction.merge);
-                }
+                this.host.applyJsonFilter(filter as any, "general", "filter", FilterAction.merge);
                 this.updateFilterView(filter);
                 this.log("Applied filter", filter);
             } catch (e) {
