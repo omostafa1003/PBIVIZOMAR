@@ -23,6 +23,8 @@ export class Visual implements IVisual {
     private host: IVisualHost;
     private inputEl: HTMLInputElement;
     private clearBtn: HTMLButtonElement;
+    private chipsContainer?: HTMLDivElement;
+    private chips: { id: string; raw: string; parsed: any; display: string }[] = [];
     private filterView: HTMLTextAreaElement;
     private copyFilterBtn: HTMLButtonElement;
     private toggleFilterBtn: HTMLButtonElement;
@@ -44,6 +46,17 @@ export class Visual implements IVisual {
         this.inputEl.type = "text";
         this.inputEl.placeholder = "Type to search...";
         this.inputEl.addEventListener("input", this.onSearchChange);
+        // Add on Enter: add as chip
+        this.inputEl.addEventListener("keydown", (e: KeyboardEvent) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                const raw = (this.inputEl.value || '').trim();
+                if (raw) {
+                    this.addChip(raw);
+                    this.inputEl.value = '';
+                }
+            }
+        });
     this.clearBtn = document.createElement("button");
     this.clearBtn.type = "button";
     this.clearBtn.textContent = "Clear";
@@ -55,6 +68,13 @@ export class Visual implements IVisual {
     controls.className = "controls";
     controls.appendChild(this.inputEl);
     controls.appendChild(this.clearBtn);
+
+    // Chips area under input
+    const chipsSection = document.createElement("div");
+    chipsSection.className = "chips-section";
+    this.chipsContainer = document.createElement("div") as HTMLDivElement;
+    this.chipsContainer.className = "chips";
+    chipsSection.appendChild(this.chipsContainer);
 
     // Filter JSON display
     const filterSection = document.createElement("div");
@@ -129,6 +149,7 @@ export class Visual implements IVisual {
     logSection.appendChild(this.logArea);
 
     this.target.appendChild(controls);
+    this.target.appendChild(chipsSection);
     this.target.appendChild(filterSection);
     this.target.appendChild(logSection);
         options.element.appendChild(this.target);
@@ -138,11 +159,18 @@ export class Visual implements IVisual {
 
     private onSearchChange = (ev: Event) => {
     const query = (ev.target as HTMLInputElement).value || "";
+    // If chips exist, typing doesn't auto-apply; chips drive filters
+    if (this.chips.length > 0) return;
     this.applyFilter(query);
     };
 
     private onClearClick = () => {
         this.inputEl.value = "";
+        // Also clear chips if any
+        if (this.chips.length) {
+            this.chips = [];
+            this.renderChips();
+        }
         this.applyFilter("");
     };
 
@@ -213,6 +241,12 @@ export class Visual implements IVisual {
             return;
         }
 
+        // If chips exist, apply from chips combined OR
+        if (this.chips.length > 0) {
+            this.applyChipsFilters();
+            return;
+        }
+
         if (query.trim().length > 0) {
             try {
                 // Parse with flexible parser and build one or many filters for the bound column
@@ -234,6 +268,93 @@ export class Visual implements IVisual {
             this.updateFilterView(null);
             this.log("Cleared filter");
         }
+    }
+
+    // Chips helpers
+    private addChip(raw: string) {
+        if (!this.filterTarget) return;
+        // de-dup identical text
+        if (this.chips.some(c => c.raw === raw)) {
+            this.log(`Skipped duplicate query: ${raw}`);
+            return;
+        }
+        try {
+            const parsed = parser.parseQuery(raw);
+            const display = raw;
+            const id = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+            this.chips.push({ id, raw, parsed, display });
+            this.renderChips();
+            this.applyChipsFilters();
+        } catch (err) {
+            this.log(`Parse error adding chip "${raw}":`, err);
+        }
+    }
+
+    private removeChip(id: string) {
+        const idx = this.chips.findIndex(c => c.id === id);
+        if (idx >= 0) {
+            const removed = this.chips[idx].display;
+            this.chips.splice(idx, 1);
+            this.renderChips();
+            this.log(`Removed query chip: ${removed}`);
+            if (this.chips.length > 0) {
+                this.applyChipsFilters();
+            } else {
+                // No chips left -> clear filters
+                this.host.applyJsonFilter(null, "general", "filter", FilterAction.remove);
+                this.updateFilterView(null);
+            }
+        }
+    }
+
+    private renderChips() {
+        if (!this.chipsContainer) return;
+        this.chipsContainer.innerHTML = '';
+        if (this.chips.length === 0) {
+            const hint = document.createElement('div');
+            hint.className = 'chips-hint';
+            hint.textContent = 'Press Enter to add the current query';
+            this.chipsContainer.appendChild(hint);
+            return;
+        }
+        for (const c of this.chips) {
+            const chipEl = document.createElement('span');
+            chipEl.className = 'chip';
+            chipEl.title = c.raw;
+            const label = document.createElement('span');
+            label.className = 'chip-label';
+            label.textContent = c.display;
+            const close = document.createElement('button');
+            close.className = 'chip-remove';
+            close.type = 'button';
+            close.setAttribute('aria-label', `Remove ${c.display}`);
+            close.textContent = '×';
+            close.onclick = () => this.removeChip(c.id);
+            chipEl.appendChild(label);
+            chipEl.appendChild(close);
+            this.chipsContainer.appendChild(chipEl);
+        }
+    }
+
+    private applyChipsFilters() {
+        if (!this.filterTarget) return;
+        if (this.chips.length === 0) return;
+        const ast = this.combineWithOr(this.chips.map(c => c.parsed));
+        const target = this.filterTarget as any as { table: string; column: string };
+        try {
+            const filter = buildFlexibleFilters(ast, target);
+            this.host.applyJsonFilter(null, "general", "filter", FilterAction.remove);
+            this.host.applyJsonFilter(filter as any, "general", "filter", FilterAction.merge);
+            this.updateFilterView(filter);
+            this.log(`Applied ${Array.isArray(filter) ? filter.length : 1} filter(s) from ${this.chips.length} chip(s)`);
+        } catch (e) {
+            this.log('Failed to build/apply filters from chips', e);
+        }
+    }
+
+    private combineWithOr(nodes: any[]): any {
+        if (nodes.length === 1) return nodes[0];
+        return { logicalOperator: 'Or', conditions: nodes };
     }
 
     // Attempt to parse a queryRef like "Table.Column" or "Table[Column]" into a filter target

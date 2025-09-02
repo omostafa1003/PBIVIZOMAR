@@ -49,6 +49,52 @@
   justify-content: space-between;
   gap: 6px;
 }
+
+/* Chips UI */
+.visual-container .chips-section {
+  display: block;
+}
+.visual-container .chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 24px;
+}
+.visual-container .chips-hint {
+  font-size: 11px;
+  color: #8aa;
+}
+.visual-container .chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #e7f0ff;
+  color: #234;
+  border: 1px solid #c7dcff;
+  border-radius: 14px;
+  padding: 2px 8px;
+  font-size: 12px;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.visual-container .chip-label {
+  white-space: nowrap;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.visual-container .chip-remove {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: #456;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.visual-container .chip-remove:hover {
+  color: #000;
+}
 .visual-container .filter-section {
   display: flex;
   flex-direction: column;
