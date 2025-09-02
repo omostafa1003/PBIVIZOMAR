@@ -27,9 +27,11 @@ export class Visual implements IVisual {
     private chipsContainer?: HTMLDivElement;
     private chips: { id: string; raw: string; parsed: any; display: string; color?: string }[] = [];
     private filterView: HTMLTextAreaElement;
+    private filterSectionEl?: HTMLDivElement;
     private copyFilterBtn: HTMLButtonElement;
     private toggleFilterBtn: HTMLButtonElement;
     private logArea: HTMLTextAreaElement;
+    private logSectionEl?: HTMLDivElement;
     private copyLogBtn: HTMLButtonElement;
     private clearLogBtn: HTMLButtonElement;
     private filterResizer?: HTMLDivElement;
@@ -38,6 +40,17 @@ export class Visual implements IVisual {
     private categoryColumnQueryRef?: string;
     private filterTarget?: models.IFilterTarget;
     private settings: SearchSettings = {};
+    private measureQueryRaw?: string;
+    private measureQueryParsed?: any;
+    // Performance: debounce and skip duplicate apply
+    private applyTimer?: number;
+    private lastAppliedKey?: string;
+    private lastAppliedJson: any | null = null;
+    private showFilterJsonVisible = false;
+    private showLogVisible = false;
+    private lastStateKey?: string;
+    private lastQueryRef?: string;
+    private lastMeasureText?: string;
 
     constructor(options: VisualConstructorOptions) {
         this.host = options.host;
@@ -45,8 +58,8 @@ export class Visual implements IVisual {
     this.target.className = "visual-container";
     this.inputEl = document.createElement("input");
         this.inputEl.type = "text";
-        this.inputEl.placeholder = "Enter keyword and press Enter";
-        this.inputEl.addEventListener("input", this.onSearchChange);
+    this.inputEl.placeholder = "Enter keyword and press Enter";
+    // Do not auto-apply while typing; only act on Enter key
         // Add on Enter: add as chip
         this.inputEl.addEventListener("keydown", (e: KeyboardEvent) => {
             if (e.key === 'Enter') {
@@ -87,6 +100,7 @@ export class Visual implements IVisual {
     // Filter JSON display
     const filterSection = document.createElement("div");
     filterSection.className = "filter-section";
+    this.filterSectionEl = filterSection;
     // Header with title and copy action, matching log section layout
     const filterHeader = document.createElement("div");
     filterHeader.className = "section-title with-action";
@@ -123,6 +137,7 @@ export class Visual implements IVisual {
     // Log area with copy button
     const logSection = document.createElement("div");
     logSection.className = "log-section";
+    this.logSectionEl = logSection;
     const logHeader = document.createElement("div");
     logHeader.className = "section-title with-action";
     const logTitle = document.createElement("span");
@@ -165,11 +180,8 @@ export class Visual implements IVisual {
     this.log("Visual initialized");
     }
 
-    private onSearchChange = (ev: Event) => {
-    const query = (ev.target as HTMLInputElement).value || "";
-    // If chips exist, typing doesn't auto-apply; chips drive filters
-    if (this.chips.length > 0) return;
-    this.applyFilter(query);
+    private onSearchChange = (_ev: Event) => {
+        // typing ignored; Enter key handler adds chip and triggers apply
     };
 
     private onClearClick = () => {
@@ -235,12 +247,62 @@ export class Visual implements IVisual {
         // Capture the bound category queryName to build a filter target
         const cat = dataView.categorical && dataView.categorical.categories && dataView.categorical.categories[0];
         if (cat && cat.source && cat.source.queryName) {
-            this.categoryColumnQueryRef = cat.source.queryName;
-            this.filterTarget = this.buildFilterTarget(this.categoryColumnQueryRef);
-            this.log("Bound column queryRef detected", this.categoryColumnQueryRef);
-            if (this.filterTarget) {
-                this.log("Derived filter target", this.filterTarget);
+            const queryRef = cat.source.queryName;
+            if (this.lastQueryRef !== queryRef) {
+                this.lastQueryRef = queryRef;
+                this.categoryColumnQueryRef = queryRef;
+                this.filterTarget = this.buildFilterTarget(queryRef);
+                this.log("Bound column queryRef detected", queryRef);
+                if (this.filterTarget) {
+                    this.log("Derived filter target", this.filterTarget);
+                }
+                // Target changed -> force re-apply path by invalidating state key
+                this.lastStateKey = undefined;
             }
+        }
+
+        // Optional: read Search Query measure (first value)
+        const values = dataView.categorical && dataView.categorical.values;
+        let measureText: string | undefined;
+        if (values && values.length > 0) {
+            const v0: any = values[0];
+            const arr: any[] = (v0 && v0.values) ? v0.values : [];
+            if (arr && arr.length > 0 && arr[0] != null) {
+                measureText = String(arr[0]);
+            }
+        }
+        this.measureQueryRaw = measureText && measureText.trim().length ? measureText : undefined;
+        if (this.lastMeasureText !== this.measureQueryRaw) {
+            this.lastMeasureText = this.measureQueryRaw;
+            try {
+                this.measureQueryParsed = this.measureQueryRaw ? parser.parseQuery(this.measureQueryRaw) : undefined;
+            } catch {
+                this.measureQueryParsed = undefined;
+            }
+            // Invalidate state key so apply can reflect measure changes
+            this.lastStateKey = undefined;
+        }
+
+        // Display toggles: hide by default unless enabled in format pane
+        const display = (dataView.metadata && (dataView.metadata.objects as any) && (dataView.metadata.objects as any).display) || {};
+        const showFilterJson = !!display.showFilterJson;
+        const showLog = !!display.showLog;
+        this.showFilterJsonVisible = showFilterJson;
+        this.showLogVisible = showLog;
+        this.setSectionVisibility(this.filterSectionEl, showFilterJson);
+        this.setSectionVisibility(this.logSectionEl, showLog);
+        // If sections became visible, refresh their contents without recomputing
+        if (showFilterJson && this.filterSectionEl) {
+            this.updateFilterView(this.lastAppliedJson);
+        }
+        if (showLog && this.logSectionEl) {
+            this.renderLogArea();
+        }
+
+        // Apply filters from current state (chips, input, or measure) only if state changed
+        const stateKey = this.getCurrentStateKey();
+        if (stateKey !== this.lastStateKey) {
+            this.applyFromState();
         }
     }
 
@@ -260,21 +322,16 @@ export class Visual implements IVisual {
                 // Parse with flexible parser and build one or many filters for the bound column
                 const parsed = parser.parseQuery(query);
                 const target = this.filterTarget as any as { table: string; column: string };
+                // If a measure query exists and no chips are present, prefer manual input only (do not combine)
                 const filter = buildFlexibleFilters(parsed, target);
-                // Clear previous filters, then apply the entire set in one merge to preserve AND across groups
-                this.host.applyJsonFilter(null, "general", "filter", FilterAction.remove);
-                this.host.applyJsonFilter(filter as any, "general", "filter", FilterAction.merge);
-                this.updateFilterView(filter);
-                this.log("Applied filter", filter);
+                this.applyBuiltFilter(filter, "Applied filter");
             } catch (e) {
                 this.log("Failed to parse/build filter", e);
             }
             return;
         } else {
             // Clear filter
-            this.host.applyJsonFilter(null, "general", "filter", FilterAction.remove);
-            this.updateFilterView(null);
-            this.log("Cleared filter");
+            this.applyBuiltFilter(null, "Cleared filter");
         }
     }
 
@@ -297,6 +354,7 @@ export class Visual implements IVisual {
             const color = palette[this.chips.length % palette.length];
             this.chips.push({ id, raw, parsed, display, color });
             this.renderChips();
+            this.lastStateKey = undefined;
             this.applyChipsFilters();
         } catch (err) {
             this.log(`Parse error adding chip "${raw}":`, err);
@@ -310,12 +368,12 @@ export class Visual implements IVisual {
             this.chips.splice(idx, 1);
             this.renderChips();
             this.log(`Removed query chip: ${removed}`);
+            this.lastStateKey = undefined;
             if (this.chips.length > 0) {
                 this.applyChipsFilters();
             } else {
                 // No chips left -> clear filters
-                this.host.applyJsonFilter(null, "general", "filter", FilterAction.remove);
-                this.updateFilterView(null);
+                this.applyBuiltFilter(null, "Cleared filter");
             }
         }
     }
@@ -356,14 +414,16 @@ export class Visual implements IVisual {
     private applyChipsFilters() {
         if (!this.filterTarget) return;
         if (this.chips.length === 0) return;
-        const ast = this.combineWithOr(this.chips.map(c => c.parsed));
+        const stateKey = this.getCurrentStateKey();
+        if (stateKey === this.lastStateKey) return;
+    const nodes: any[] = this.chips.map(c => c.parsed);
+    if (this.measureQueryParsed) nodes.push(this.measureQueryParsed);
+    const ast = this.combineWithOr(nodes);
         const target = this.filterTarget as any as { table: string; column: string };
         try {
             const filter = buildFlexibleFilters(ast, target);
-            this.host.applyJsonFilter(null, "general", "filter", FilterAction.remove);
-            this.host.applyJsonFilter(filter as any, "general", "filter", FilterAction.merge);
-            this.updateFilterView(filter);
-            this.log(`Applied ${Array.isArray(filter) ? filter.length : 1} filter(s) from ${this.chips.length} chip(s)`);
+            this.applyBuiltFilter(filter, `Applied ${Array.isArray(filter) ? filter.length : 1} filter(s) from ${this.chips.length} chip(s)`);
+            this.lastStateKey = stateKey;
         } catch (e) {
             this.log('Failed to build/apply filters from chips', e);
         }
@@ -372,6 +432,35 @@ export class Visual implements IVisual {
     private combineWithOr(nodes: any[]): any {
         if (nodes.length === 1) return nodes[0];
         return { logicalOperator: 'Or', conditions: nodes };
+    }
+
+    private applyFromState() {
+        if (!this.filterTarget) return;
+        if (this.chips.length > 0) {
+        this.applyChipsFilters();
+        return;
+    }
+    // Do not auto-apply from raw input; wait for Enter (chip added)
+        // If no chips and no manual input, but a measure query exists -> apply it
+        if (this.measureQueryParsed) {
+            const target = this.filterTarget as any as { table: string; column: string };
+            try {
+        const filter = buildFlexibleFilters(this.measureQueryParsed, target);
+        this.applyBuiltFilter(filter, "Applied measure-based filter");
+                this.lastStateKey = this.getCurrentStateKey();
+            } catch (e) {
+                this.log("Failed to apply measure-based filter", e);
+            }
+            return;
+        }
+        // Nothing -> clear
+    this.applyBuiltFilter(null, "Cleared filter");
+        this.lastStateKey = this.getCurrentStateKey();
+    }
+
+    private setSectionVisibility(el: HTMLElement | undefined, visible: boolean) {
+        if (!el) return;
+        el.style.display = visible ? '' : 'none';
     }
 
     // Attempt to parse a queryRef like "Table.Column" or "Table[Column]" into a filter target
@@ -395,6 +484,10 @@ export class Visual implements IVisual {
     }
 
     private updateFilterView(json: any | null) {
+        this.lastAppliedJson = json;
+        if (!this.showFilterJsonVisible) {
+            return; // Skip heavy stringify when hidden
+        }
         if (!json) {
             this.filterView.value = "(none)";
             return;
@@ -409,7 +502,7 @@ export class Visual implements IVisual {
     private log(message: string, data?: any) {
         const ts = new Date().toISOString();
         let line = `[${ts}] ${message}`;
-        if (typeof data !== "undefined") {
+        if (this.showLogVisible && typeof data !== "undefined") {
             try {
                 line += `\n${JSON.stringify(data, null, 2)}`;
             } catch {
@@ -421,9 +514,15 @@ export class Visual implements IVisual {
         if (this.logs.length > 200) {
             this.logs.splice(0, this.logs.length - 200);
         }
-        this.logArea.value = this.logs.join("\n\n");
+        if (this.showLogVisible) {
+            this.renderLogArea();
+        }
         // Scroll to bottom
     // keep focus behavior but no internal scroll management
+    }
+
+    private renderLogArea() {
+        this.logArea.value = this.logs.join("\n\n");
     }
 
     // Optional: keep function in case we want to re-enable autosizing later
@@ -472,10 +571,61 @@ export class Visual implements IVisual {
                 objectName: "search",
                 selector: undefined,
                 properties: {
-                    placeholder: this.settings.placeholder || "Type to search..."
+                    placeholder: this.settings.placeholder || "Enter keyword and press Enter"
+                }
+            });
+        } else if (options.objectName === "display") {
+            instances.push({
+                objectName: "display",
+                selector: undefined,
+                properties: {
+                    showFilterJson: false,
+                    showLog: false
                 }
             });
         }
         return instances;
+    }
+
+    // Centralized application with duplicate guard and debouncing helpers
+    private applyBuiltFilter(filter: any | null, reason: string) {
+        // Compute a stable key
+        let key = 'clear';
+        try {
+            key = filter ? JSON.stringify(filter) : 'clear';
+        } catch {
+            key = 'unknown';
+        }
+        if (this.lastAppliedKey === key) {
+            // Skip duplicate apply
+            return;
+        }
+        // Apply
+        this.host.applyJsonFilter(null, "general", "filter", FilterAction.remove);
+        if (filter) {
+            this.host.applyJsonFilter(filter as any, "general", "filter", FilterAction.merge);
+        }
+        this.lastAppliedKey = key;
+        this.updateFilterView(filter);
+        this.log(reason, this.showLogVisible ? filter : undefined);
+    }
+
+    // Debounce helper for input/chip driven updates
+    private scheduleApplyFromState(delayMs = 150) {
+        if (this.applyTimer) {
+            clearTimeout(this.applyTimer);
+        }
+        this.applyTimer = window.setTimeout(() => {
+            this.applyFromState();
+        }, delayMs) as unknown as number;
+    }
+
+    private getCurrentStateKey(): string {
+        const tgt = this.categoryColumnQueryRef || '';
+        const chipsKey = this.chips.map(c => c.raw).join('||');
+        const inputKey = (this.inputEl && this.inputEl.value) ? this.inputEl.value.trim() : '';
+        const measureKey = this.measureQueryRaw || '';
+        // Only some parts are active depending on state, but composing all is fine
+        return `t=${tgt}|chips=${chipsKey}|input=${inputKey}|measure=${measureKey}`;
     }
 }

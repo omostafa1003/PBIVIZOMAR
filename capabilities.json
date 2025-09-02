@@ -8,17 +8,26 @@
       "preferredTypes": [
         { "text": true }
       ]
+    },
+    {
+      "displayName": "Search Query",
+      "name": "searchQuery",
+      "kind": "Measure",
+      "preferredTypes": [ { "text": true } ]
     }
   ],
   "dataViewMappings": [
     {
       "conditions": [
-        { "searchField": { "max": 1, "min": 1 } }
+        { "searchField": { "max": 1, "min": 1 }, "searchQuery": { "max": 1, "min": 0 } }
       ],
       "categorical": {
         "categories": {
           "for": { "in": "searchField" },
           "dataReductionAlgorithm": { "window": { "count": 1 } }
+        },
+        "values": {
+          "select": [ { "bind": { "to": "searchQuery" } } ]
         }
       }
     }
@@ -38,6 +47,19 @@
         "placeholder": {
           "displayName": "Placeholder",
           "type": { "text": true }
+        }
+      }
+    },
+    "display": {
+      "displayName": "Display",
+      "properties": {
+        "showFilterJson": {
+          "displayName": "Show Applied Filter JSON",
+          "type": { "bool": true }
+        },
+        "showLog": {
+          "displayName": "Show Log",
+          "type": { "bool": true }
         }
       }
     }
