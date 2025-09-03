@@ -4,7 +4,7 @@
     "displayName": "Search Query Visual",
     "guid": "SearchQueryVisual12345",
     "visualClassName": "Visual",
-  "version": "0.1.16.0",
+  "version": "0.1.17.0",
     "description": "A simple visual that filters a single bound column using a user search query.",
     "supportUrl": "https://github.com/microsoft/powerbi-models",
     "gitHubUrl": "https://github.com/microsoft/powerbi-models"

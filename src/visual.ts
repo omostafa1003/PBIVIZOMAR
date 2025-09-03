@@ -284,9 +284,10 @@ export class Visual implements IVisual {
         }
 
         // Display toggles: hide by default unless enabled in format pane
-        const display = (dataView.metadata && (dataView.metadata.objects as any) && (dataView.metadata.objects as any).display) || {};
-        const showFilterJson = !!display.showFilterJson;
-        const showLog = !!display.showLog;
+    const displayObj = (dataView.metadata && (dataView.metadata.objects as any) && (dataView.metadata.objects as any).display) || {};
+    // Respect existing state unless user explicitly toggles
+    const showFilterJson = typeof displayObj.showFilterJson === 'boolean' ? displayObj.showFilterJson : this.showFilterJsonVisible;
+    const showLog = typeof displayObj.showLog === 'boolean' ? displayObj.showLog : this.showLogVisible;
         this.showFilterJsonVisible = showFilterJson;
         this.showLogVisible = showLog;
         this.setSectionVisibility(this.filterSectionEl, showFilterJson);
@@ -579,8 +580,8 @@ export class Visual implements IVisual {
                 objectName: "display",
                 selector: undefined,
                 properties: {
-                    showFilterJson: false,
-                    showLog: false
+                    showFilterJson: this.showFilterJsonVisible,
+                    showLog: this.showLogVisible
                 }
             });
         }
