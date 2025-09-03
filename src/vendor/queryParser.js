@@ -35,22 +35,18 @@ function tokenize(query) {
             i++;
         }
         else if (char === '+' || char === '-') {
-            // Check if followed by a word (no space)
+            // If attached directly to a bare word (no space), absorb into the word token
             if (i + 1 < query.length && /[a-zA-Z0-9_]/.test(query[i + 1])) {
-                // Modifier attached to word - consume the word too
                 let j = i + 1;
                 while (j < query.length && /[a-zA-Z0-9_]/.test(query[j])) {
                     j++;
                 }
                 const word = query.slice(i + 1, j);
-                tokens.push({
-                    type: 'word',
-                    value: char + word // Include the modifier in the value
-                });
+                tokens.push({ type: 'word', value: char + word });
                 i = j;
             }
             else {
-                // Standalone modifier - this shouldn't happen in valid syntax
+                // Prefix modifier before quoted phrase or group, keep as separate token
                 tokens.push({ type: 'modifier', value: char });
                 i++;
             }
@@ -124,8 +120,13 @@ function parseAndExpression(tokens, index) {
             // OR has lower precedence, so we stop here
             break;
         }
-        else if (token.type === 'word' || token.type === 'quoted') {
-            // Implicit AND - consume the next term
+        else if (
+        // Implicit AND - next token begins a primary expression
+        token.type === 'word' ||
+            token.type === 'quoted' ||
+            (token.type === 'paren' && token.value === '(') ||
+            (token.type === 'operator' && token.value === 'NOT') ||
+            token.type === 'modifier') {
             const right = parsePrimaryExpression(tokens, index);
             conditions.push(right);
         }
@@ -151,6 +152,22 @@ function parsePrimaryExpression(tokens, index) {
         throw new Error('Unexpected end of expression');
     }
     const token = tokens[index.value];
+    // Handle prefix modifiers before any primary (e.g., -"phrase", -(a b), +term)
+    if (token.type === 'modifier') {
+        const mod = token.value;
+        index.value++;
+        const sub = parsePrimaryExpression(tokens, index);
+        if (mod === '-') {
+            return { not: true, node: sub };
+        }
+        else if (mod === '+') {
+            if ('value' in sub) {
+                return Object.assign({}, sub, { isRequired: true });
+            }
+            // For groups, '+' has no special meaning; return as-is
+            return sub;
+        }
+    }
     if (token.type === 'paren' && token.value === '(') {
         index.value++;
         const subExpr = parseExpression(tokens, index);
@@ -161,22 +178,10 @@ function parsePrimaryExpression(tokens, index) {
         return subExpr;
     }
     else if (token.type === 'operator' && token.value === 'NOT') {
-        // Handle NOT operator - next token should be excluded
+        // Handle NOT operator before any primary (word, phrase, or group)
         index.value++;
-        if (index.value < tokens.length) {
-            const nextToken = tokens[index.value];
-            if (nextToken.type === 'word' || nextToken.type === 'quoted') {
-                const condition = {
-                    value: nextToken.value,
-                    isQuoted: nextToken.type === 'quoted',
-                    isRequired: false,
-                    isExcluded: true
-                };
-                index.value++;
-                return condition;
-            }
-        }
-        throw new Error('Expected term after NOT operator');
+        const sub = parsePrimaryExpression(tokens, index);
+        return { not: true, node: sub };
     }
     else if (token.type === 'word' || token.type === 'quoted') {
         // Handle modifiers in the word value
@@ -209,40 +214,42 @@ function parseQuery(query) {
 }
 // Example: Building Power BI filter from parsed query
 function buildFilterFromParsed(parsed, table, column) {
-    function convertCondition(condition) {
+    // Lightweight converter for demo/CLI only; supports negated nodes
+    function convert(condition) {
+        // Negated subtree
+        if (condition && typeof condition === 'object' && 'not' in condition && condition.not === true) {
+            const inner = condition.node;
+            // De Morgan: NOT group => flip operator and negate children; NOT leaf => DoesNotContain
+            if (inner && typeof inner === 'object' && 'conditions' in inner && inner.conditions) {
+                const op = inner.logicalOperator === 'And' ? 'Or' : 'And';
+                return {
+                    operator: op,
+                    conditions: inner.conditions.map(ch => convert({ not: true, node: ch }))
+                };
+            }
+            if ('value' in inner) {
+                return { operator: 'DoesNotContain', value: inner.value };
+            }
+        }
         if ('value' in condition) {
-            // It's a Condition
             const cond = condition;
             if (cond.isExcluded) {
-                // For excluded terms, we need to create a NOT condition
-                return {
-                    not: {
-                        operator: 'Contains', // Always use Contains for search functionality
-                        value: cond.value
-                    }
-                };
+                return { operator: 'DoesNotContain', value: cond.value };
             }
-            else {
-                return {
-                    operator: 'Contains', // Always use Contains for search functionality
-                    value: cond.value
-                };
-            }
+            return { operator: 'Contains', value: cond.value };
         }
-        else {
-            // It's a ParsedQuery
-            return {
-                operator: condition.logicalOperator === 'And' ? 'And' : 'Or',
-                conditions: condition.conditions.map(convertCondition)
-            };
-        }
+        // Group
+        return {
+            operator: condition.logicalOperator === 'And' ? 'And' : 'Or',
+            conditions: condition.conditions.map(convert)
+        };
     }
     if ('value' in parsed) {
         return {
             $schema: "http://powerbi.com/product/schema#advanced",
             target: { table, column },
             logicalOperator: "Or",
-            conditions: [convertCondition(parsed)]
+            conditions: [convert(parsed)]
         };
     }
     else {
@@ -250,7 +257,7 @@ function buildFilterFromParsed(parsed, table, column) {
             $schema: "http://powerbi.com/product/schema#advanced",
             target: { table, column },
             logicalOperator: parsed.logicalOperator === 'And' ? 'And' : 'Or',
-            conditions: parsed.conditions.map(convertCondition)
+            conditions: parsed.conditions.map(convert)
         };
     }
 }

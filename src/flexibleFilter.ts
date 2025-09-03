@@ -9,7 +9,13 @@ export interface Condition {
   isExcluded?: boolean;
 }
 
-export type Node = Condition | ParsedQuery;
+export type Node = Condition | ParsedQuery | Negated;
+
+// Negated subtree, produced when parser marks a group or term excluded (e.g., -(A or B) or -"phrase")
+export interface Negated {
+  not: true;
+  node: Node;
+}
 
 export interface ParsedQuery {
   logicalOperator: Logical;
@@ -25,20 +31,29 @@ function isParsedQuery(n: Node): n is ParsedQuery {
   return (n as ParsedQuery).conditions !== undefined && (n as any).logicalOperator !== undefined;
 }
 
-function flattenAtoms(node: Node): Condition[] {
+function isNegated(n: Node): n is Negated {
+  return !!(n as any).not;
+}
+
+// Helper only for already-normalized leaves (Condition)
+function flattenAtoms(node: ParsedQuery | Condition): Condition[] {
   if (!isParsedQuery(node)) {
-    return [node];
+    return [node as Condition];
   }
   const out: Condition[] = [];
   for (const child of node.conditions) {
-    out.push(...flattenAtoms(child));
+    if (isParsedQuery(child)) {
+      out.push(...flattenAtoms(child));
+    } else if (!isNegated(child)) {
+      out.push(child as Condition);
+    }
   }
   return out;
 }
 
 export function buildFlexibleFilters(parsed: ParsedQuery, target: TargetRef): models.IFilter | models.IFilter[] {
   // Convert the expression into Conjunctive Normal Form (CNF): AND of OR-clauses
-  const clauses = toCNF(parsed);
+  const clauses = toCNF(pushDownNots(parsed));
   const targetRef: models.IFilterTarget = { table: target.table, column: target.column } as any;
   const filters: models.IFilter[] = [];
 
@@ -90,7 +105,7 @@ export function buildFlexibleFilters(parsed: ParsedQuery, target: TargetRef): mo
 // Convert the parsed tree to CNF: list of clauses (each clause is OR over conditions)
 function toCNF(node: Node): Condition[][] {
   if (!isParsedQuery(node)) {
-    return [[node]];
+    return [[node as Condition]];
   }
   if (node.logicalOperator === 'And') {
     // AND => concatenate clauses from children
@@ -126,10 +141,38 @@ function distributeOr(cnfA: Condition[][], cnfB: Condition[][]): Condition[][] {
   return out;
 }
 
+// Push NOTs to leaf conditions using De Morgan's laws so CNF builder can rely on only And/Or
+function pushDownNots(node: Node, negate = false): Node {
+  if (isParsedQuery(node)) {
+    if (negate) {
+      // Adjusted semantics: negate group -> AND of negated children
+      return {
+        logicalOperator: 'And',
+        conditions: node.conditions.map(child => pushDownNots(child, true))
+      } as ParsedQuery;
+    }
+    return {
+      logicalOperator: node.logicalOperator,
+      conditions: node.conditions.map(child => pushDownNots(child, false))
+    } as ParsedQuery;
+  }
+  if (isNegated(node)) {
+    // Flip the negate flag for the wrapped node
+    return pushDownNots(node.node, !negate);
+  }
+  const cond = node as Condition;
+  if (negate) {
+    // Create a negated copy of the condition
+    return { ...cond, isExcluded: true } as Condition;
+  }
+  return cond;
+}
+
 function toAdvancedCondition(c: Condition): models.IAdvancedFilterCondition {
   // Exclusions use DoesNotContain; others use Contains
   const op: models.AdvancedFilterConditionOperators = c.isExcluded ? 'DoesNotContain' : 'Contains';
-  return { operator: op, value: c.value } as any;
+  const val = c.isQuoted ? c.value.trim() : c.value;
+  return { operator: op, value: val } as any;
 }
 
 function canUseBasicIn(group: Condition[]): boolean {
@@ -145,7 +188,7 @@ function isNumericString(s: string): boolean {
 }
 
 function toBasicValue(c: Condition): string | number {
-  if (c.isQuoted) return c.value;
+  if (c.isQuoted) return c.value.trim();
   if (isNumericString(c.value)) {
     const num = Number(c.value);
     return Number.isNaN(num) ? c.value : num;
