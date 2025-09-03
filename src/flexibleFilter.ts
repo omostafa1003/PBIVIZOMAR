@@ -171,7 +171,8 @@ function pushDownNots(node: Node, negate = false): Node {
 function toAdvancedCondition(c: Condition): models.IAdvancedFilterCondition {
   // Exclusions use DoesNotContain; others use Contains
   const op: models.AdvancedFilterConditionOperators = c.isExcluded ? 'DoesNotContain' : 'Contains';
-  const val = c.isQuoted ? c.value.trim() : c.value;
+  // Preserve spaces inside quotes as entered by the user
+  const val = c.value;
   return { operator: op, value: val } as any;
 }
 
@@ -179,6 +180,8 @@ function canUseBasicIn(group: Condition[]): boolean {
   if (!group.length) return false;
   // Only allow Basic In for purely numeric lists without modifiers.
   if (group.some(c => c.isExcluded || c.isRequired)) return false;
+  // Do not treat quoted numbers as numeric list entries; quoted values are textual
+  if (group.some(c => c.isQuoted)) return false;
   return group.every(c => isNumericString(c.value));
 }
 
@@ -188,7 +191,7 @@ function isNumericString(s: string): boolean {
 }
 
 function toBasicValue(c: Condition): string | number {
-  if (c.isQuoted) return c.value.trim();
+  if (c.isQuoted) return c.value; // preserve spaces
   if (isNumericString(c.value)) {
     const num = Number(c.value);
     return Number.isNaN(num) ? c.value : num;

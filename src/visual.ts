@@ -25,7 +25,7 @@ export class Visual implements IVisual {
     private clearBtn: HTMLButtonElement; // deprecated UI; keep reference but not rendered
     private inputClearBtn?: HTMLButtonElement;
     private chipsContainer?: HTMLDivElement;
-    private chips: { id: string; raw: string; parsed: any; display: string; color?: string }[] = [];
+    private chips: { id: string; raw: string; parsed: any; display: string; color?: string; fixed?: boolean }[] = [];
     private filterView: HTMLTextAreaElement;
     private filterSectionEl?: HTMLDivElement;
     private copyFilterBtn: HTMLButtonElement;
@@ -261,7 +261,7 @@ export class Visual implements IVisual {
             }
         }
 
-        // Optional: read Search Query measure (first value)
+    // Optional: read Search Query measure (first value)
         const values = dataView.categorical && dataView.categorical.values;
         let measureText: string | undefined;
         if (values && values.length > 0) {
@@ -271,7 +271,7 @@ export class Visual implements IVisual {
                 measureText = String(arr[0]);
             }
         }
-        this.measureQueryRaw = measureText && measureText.trim().length ? measureText : undefined;
+        this.measureQueryRaw = measureText && String(measureText).length ? measureText : undefined;
         if (this.lastMeasureText !== this.measureQueryRaw) {
             this.lastMeasureText = this.measureQueryRaw;
             try {
@@ -281,6 +281,8 @@ export class Visual implements IVisual {
             }
             // Invalidate state key so apply can reflect measure changes
             this.lastStateKey = undefined;
+            // Sync a fixed measure chip for visibility and OR semantics
+            this.syncMeasureChip();
         }
 
         // Display toggles: hide by default unless enabled in format pane
@@ -304,6 +306,24 @@ export class Visual implements IVisual {
         const stateKey = this.getCurrentStateKey();
         if (stateKey !== this.lastStateKey) {
             this.applyFromState();
+        }
+    }
+
+    // Ensure a single fixed chip mirrors the Search Query measure when present
+    private syncMeasureChip() {
+        // Remove any existing fixed chip
+        const before = this.chips.length;
+        this.chips = this.chips.filter(c => !c.fixed);
+        const after = this.chips.length;
+        if (before !== after) {
+            this.renderChips();
+        }
+        if (this.measureQueryParsed && this.measureQueryRaw) {
+            const id = `measure`;
+            const display = this.measureQueryRaw;
+            const color = '#ddeeff';
+            this.chips.unshift({ id, raw: this.measureQueryRaw, parsed: this.measureQueryParsed, display, color, fixed: true });
+            this.renderChips();
         }
     }
 
@@ -391,7 +411,7 @@ export class Visual implements IVisual {
         }
         for (const c of this.chips) {
             const chipEl = document.createElement('span');
-            chipEl.className = 'chip';
+            chipEl.className = 'chip' + (c.fixed ? ' chip-fixed' : '');
             if (c.color) {
                 chipEl.style.background = c.color;
                 chipEl.style.borderColor = c.color;
@@ -399,15 +419,17 @@ export class Visual implements IVisual {
             chipEl.title = c.raw;
             const label = document.createElement('span');
             label.className = 'chip-label';
-            label.textContent = c.display;
-            const close = document.createElement('button');
-            close.className = 'chip-remove';
-            close.type = 'button';
-            close.setAttribute('aria-label', `Remove ${c.display}`);
-            close.textContent = '×';
-            close.onclick = () => this.removeChip(c.id);
+            label.textContent = c.fixed ? `Measure: ${c.display}` : c.display;
             chipEl.appendChild(label);
-            chipEl.appendChild(close);
+            if (!c.fixed) {
+                const close = document.createElement('button');
+                close.className = 'chip-remove';
+                close.type = 'button';
+                close.setAttribute('aria-label', `Remove ${c.display}`);
+                close.textContent = '×';
+                close.onclick = () => this.removeChip(c.id);
+                chipEl.appendChild(close);
+            }
             this.chipsContainer.appendChild(chipEl);
         }
     }
@@ -415,10 +437,10 @@ export class Visual implements IVisual {
     private applyChipsFilters() {
         if (!this.filterTarget) return;
         if (this.chips.length === 0) return;
-        const stateKey = this.getCurrentStateKey();
+    const stateKey = this.getCurrentStateKey();
         if (stateKey === this.lastStateKey) return;
+    // Chips already include a fixed measure chip when present
     const nodes: any[] = this.chips.map(c => c.parsed);
-    if (this.measureQueryParsed) nodes.push(this.measureQueryParsed);
     const ast = this.combineWithOr(nodes);
         const target = this.filterTarget as any as { table: string; column: string };
         try {
@@ -438,10 +460,10 @@ export class Visual implements IVisual {
     private applyFromState() {
         if (!this.filterTarget) return;
         if (this.chips.length > 0) {
-        this.applyChipsFilters();
-        return;
-    }
-    // Do not auto-apply from raw input; wait for Enter (chip added)
+            this.applyChipsFilters();
+            return;
+        }
+        // Do not auto-apply from raw input; wait for Enter (chip added)
         // If no chips and no manual input, but a measure query exists -> apply it
         if (this.measureQueryParsed) {
             const target = this.filterTarget as any as { table: string; column: string };
@@ -623,7 +645,7 @@ export class Visual implements IVisual {
 
     private getCurrentStateKey(): string {
         const tgt = this.categoryColumnQueryRef || '';
-        const chipsKey = this.chips.map(c => c.raw).join('||');
+    const chipsKey = this.chips.map(c => (c.fixed ? `#${c.raw}` : c.raw)).join('||');
         const inputKey = (this.inputEl && this.inputEl.value) ? this.inputEl.value.trim() : '';
         const measureKey = this.measureQueryRaw || '';
         // Only some parts are active depending on state, but composing all is fine
