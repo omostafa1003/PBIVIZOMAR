@@ -62,6 +62,27 @@
           "type": { "bool": true }
         }
       }
+    },
+    "limits": {
+      "displayName": "Limits",
+      "properties": {
+        "allowMeasureChip": {
+          "displayName": "Show measure chip",
+          "type": { "bool": true }
+        },
+        "maxQueryLength": {
+          "displayName": "Max query length (chars)",
+          "type": { "numeric": true }
+        },
+        "maxTokens": {
+          "displayName": "Max tokens",
+          "type": { "numeric": true }
+        },
+        "maxClauses": {
+          "displayName": "Max conditions",
+          "type": { "numeric": true }
+        }
+      }
     }
   }
 }

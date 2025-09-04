@@ -25,7 +25,7 @@ export class Visual implements IVisual {
     private clearBtn: HTMLButtonElement; // deprecated UI; keep reference but not rendered
     private inputClearBtn?: HTMLButtonElement;
     private chipsContainer?: HTMLDivElement;
-    private chips: { id: string; raw: string; parsed: any; display: string; color?: string; fixed?: boolean }[] = [];
+    private chips: { id: string; raw: string; parsed: any; display: string; color?: string; fixed?: boolean; blocked?: boolean }[] = [];
     private filterView: HTMLTextAreaElement;
     private filterSectionEl?: HTMLDivElement;
     private copyFilterBtn: HTMLButtonElement;
@@ -51,6 +51,12 @@ export class Visual implements IVisual {
     private lastStateKey?: string;
     private lastQueryRef?: string;
     private lastMeasureText?: string;
+    // Limits / guardrails
+    private allowMeasureChip = true;
+    private maxQueryLength = 500; // characters
+    private maxTokens = 100; // token count
+    private maxClauses = 50; // leaf conditions
+    private lastGuardReason?: string;
 
     constructor(options: VisualConstructorOptions) {
         this.host = options.host;
@@ -77,9 +83,38 @@ export class Visual implements IVisual {
     // Controls row
     const controls = document.createElement("div");
     controls.className = "controls";
-    // Wrap input to position inline X button
+    // Wrap input to position inline search and clear buttons
     const inputWrap = document.createElement("div");
     inputWrap.className = "input-wrap";
+    // Left search icon (decorative)
+    const inputIcon = document.createElement('span');
+    inputIcon.className = 'input-icon';
+    // Inline SVG magnifying glass
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const searchSvg = document.createElementNS(svgNS, 'svg');
+    searchSvg.setAttribute('viewBox', '0 0 16 16');
+    searchSvg.setAttribute('width', '14');
+    searchSvg.setAttribute('height', '14');
+    const circle = document.createElementNS(svgNS, 'circle');
+    circle.setAttribute('cx', '7');
+    circle.setAttribute('cy', '7');
+    circle.setAttribute('r', '5');
+    circle.setAttribute('fill', 'none');
+    circle.setAttribute('stroke', '#6b7280');
+    circle.setAttribute('stroke-width', '1.5');
+    const handle = document.createElementNS(svgNS, 'line');
+    handle.setAttribute('x1', '10.5');
+    handle.setAttribute('y1', '10.5');
+    handle.setAttribute('x2', '14');
+    handle.setAttribute('y2', '14');
+    handle.setAttribute('stroke', '#6b7280');
+    handle.setAttribute('stroke-width', '1.5');
+    handle.setAttribute('stroke-linecap', 'round');
+    searchSvg.appendChild(circle);
+    searchSvg.appendChild(handle);
+    inputIcon.appendChild(searchSvg);
+    inputIcon.setAttribute('aria-hidden', 'true');
+    inputWrap.appendChild(inputIcon);
     inputWrap.appendChild(this.inputEl);
     this.inputClearBtn = document.createElement("button");
     this.inputClearBtn.type = "button";
@@ -244,7 +279,14 @@ export class Visual implements IVisual {
             this.inputEl.placeholder = this.settings.placeholder || "Enter keyword and press Enter";
         }
 
-        // Capture the bound category queryName to build a filter target
+    // Read limits from format pane if provided
+    const limitsObj = (dataView.metadata && (dataView.metadata.objects as any) && (dataView.metadata.objects as any).limits) || {};
+    if (typeof limitsObj.allowMeasureChip === 'boolean') this.allowMeasureChip = limitsObj.allowMeasureChip;
+    if (typeof limitsObj.maxQueryLength === 'number' && limitsObj.maxQueryLength > 0) this.maxQueryLength = Math.floor(limitsObj.maxQueryLength);
+    if (typeof limitsObj.maxTokens === 'number' && limitsObj.maxTokens > 0) this.maxTokens = Math.floor(limitsObj.maxTokens);
+    if (typeof limitsObj.maxClauses === 'number' && limitsObj.maxClauses > 0) this.maxClauses = Math.floor(limitsObj.maxClauses);
+
+    // Capture the bound category queryName to build a filter target
         const cat = dataView.categorical && dataView.categorical.categories && dataView.categorical.categories[0];
         if (cat && cat.source && cat.source.queryName) {
             const queryRef = cat.source.queryName;
@@ -274,11 +316,10 @@ export class Visual implements IVisual {
         this.measureQueryRaw = measureText && String(measureText).length ? measureText : undefined;
         if (this.lastMeasureText !== this.measureQueryRaw) {
             this.lastMeasureText = this.measureQueryRaw;
-            try {
-                this.measureQueryParsed = this.measureQueryRaw ? parser.parseQuery(this.measureQueryRaw) : undefined;
-            } catch {
-                this.measureQueryParsed = undefined;
-            }
+            // Validate before parsing to avoid heavy work on huge strings
+            const validated = this.validateAndParseMeasure(this.measureQueryRaw);
+            this.measureQueryParsed = validated.parsed;
+            this.lastGuardReason = validated.reason;
             // Invalidate state key so apply can reflect measure changes
             this.lastStateKey = undefined;
             // Sync a fixed measure chip for visibility and OR semantics
@@ -318,13 +359,64 @@ export class Visual implements IVisual {
         if (before !== after) {
             this.renderChips();
         }
-        if (this.measureQueryParsed && this.measureQueryRaw) {
+    if (this.allowMeasureChip && this.measureQueryRaw) {
+            // If guard blocked parsing, show a warning chip; else show the actual measure chip
             const id = `measure`;
-            const display = this.measureQueryRaw;
-            const color = '#ddeeff';
-            this.chips.unshift({ id, raw: this.measureQueryRaw, parsed: this.measureQueryParsed, display, color, fixed: true });
+            if (this.measureQueryParsed) {
+                const display = this.measureQueryRaw;
+                const color = '#ddeeff';
+                this.chips.unshift({ id, raw: this.measureQueryRaw, parsed: this.measureQueryParsed, display, color, fixed: true });
+            } else if (this.lastGuardReason) {
+        const reason = this.lastGuardReason;
+        const display = reason; // show reason directly, without the word 'measure'
+        // Use raw for tooltip as the plain reason
+        this.chips.unshift({ id, raw: reason, parsed: { logicalOperator: 'And', conditions: [] }, display, fixed: true, blocked: true });
+            }
             this.renderChips();
         }
+    }
+
+    // Validate and (if acceptable) parse the measure query string
+    private validateAndParseMeasure(raw?: string): { parsed?: any; reason?: string } {
+        if (!raw) return { parsed: undefined };
+        if (!this.allowMeasureChip) return { parsed: undefined, reason: 'Disabled' };
+        // Length guard
+        if (raw.length > this.maxQueryLength) {
+            return { parsed: undefined, reason: `Too long (${raw.length} chars > ${this.maxQueryLength})` };
+        }
+        // Token guard (cheap)
+        let tokens: any[] = [];
+        try {
+            tokens = parser.tokenize ? parser.tokenize(raw) : [];
+        } catch {
+            // If tokenizer failed, fall back to simple split estimate
+            tokens = raw.split(/\s+/);
+        }
+        if (this.maxTokens > 0 && tokens.length > this.maxTokens) {
+            return { parsed: undefined, reason: `Too many tokens (${tokens.length} > ${this.maxTokens})` };
+        }
+        // Parse and leaf-count guard
+        try {
+            const parsed = parser.parseQuery(raw);
+            const leaves = this.countLeaves(parsed);
+            if (this.maxClauses > 0 && leaves > this.maxClauses) {
+                return { parsed: undefined, reason: `Too many conditions (${leaves} > ${this.maxClauses})` };
+            }
+            return { parsed };
+        } catch (e) {
+            return { parsed: undefined, reason: 'Parse error' };
+        }
+    }
+
+    // Count leaf conditions in the parsed AST, including within negations and groups
+    private countLeaves(node: any): number {
+        if (!node || typeof node !== 'object') return 0;
+        if ('value' in node) return 1;
+        if ('not' in node && node.not && node.node) return this.countLeaves(node.node);
+        if ('conditions' in node && Array.isArray(node.conditions)) {
+            return node.conditions.reduce((sum: number, ch: any) => sum + this.countLeaves(ch), 0);
+        }
+        return 0;
     }
 
     private applyFilter(query: string) {
@@ -359,13 +451,29 @@ export class Visual implements IVisual {
     // Chips helpers
     private addChip(raw: string) {
         if (!this.filterTarget) return;
+        // Guard user-entered queries as well
+        if (raw.length > this.maxQueryLength) {
+            this.log(`Skipped chip: too long (${raw.length} > ${this.maxQueryLength})`);
+            return;
+        }
         // de-dup identical text
         if (this.chips.some(c => c.raw === raw)) {
             this.log(`Skipped duplicate query: ${raw}`);
             return;
         }
         try {
+            // Token guard
+            const tokens = parser.tokenize ? parser.tokenize(raw) : raw.split(/\s+/);
+            if (this.maxTokens > 0 && tokens.length > this.maxTokens) {
+                this.log(`Skipped chip: too many tokens (${tokens.length} > ${this.maxTokens})`);
+                return;
+            }
             const parsed = parser.parseQuery(raw);
+            const leaves = this.countLeaves(parsed);
+            if (this.maxClauses > 0 && leaves > this.maxClauses) {
+                this.log(`Skipped chip: too many conditions (${leaves} > ${this.maxClauses})`);
+                return;
+            }
             const display = raw;
             const id = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
             // Assign a color class cycling through presets
@@ -411,15 +519,34 @@ export class Visual implements IVisual {
         }
         for (const c of this.chips) {
             const chipEl = document.createElement('span');
-            chipEl.className = 'chip' + (c.fixed ? ' chip-fixed' : '');
-            if (c.color) {
+            chipEl.className = 'chip' + (c.fixed ? ' chip-fixed' : '') + (c.blocked ? ' chip-blocked' : '');
+            if (c.color && !c.blocked) {
                 chipEl.style.background = c.color;
                 chipEl.style.borderColor = c.color;
             }
             chipEl.title = c.raw;
             const label = document.createElement('span');
             label.className = 'chip-label';
-            label.textContent = c.fixed ? `Measure: ${c.display}` : c.display;
+            // If fixed (measure), prepend an inline FX SVG icon (calculated column style)
+            if (c.fixed) {
+                const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+                icon.setAttribute('width', '14');
+                icon.setAttribute('height', '14');
+                icon.setAttribute('viewBox', '0 0 16 16');
+                icon.classList.add('chip-icon');
+                const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+                text.setAttribute('x', '8');
+                text.setAttribute('y', '11.5');
+                text.setAttribute('text-anchor', 'middle');
+                text.setAttribute('font-family', 'Segoe UI, SegoeUI, Arial, sans-serif');
+                text.setAttribute('font-weight', '700');
+                text.setAttribute('font-size', '11');
+                text.setAttribute('fill', c.blocked ? '#ffffff' : '#2b5fc1');
+                text.textContent = 'fx';
+                icon.appendChild(text);
+                chipEl.appendChild(icon);
+            }
+            label.textContent = c.display;
             chipEl.appendChild(label);
             if (!c.fixed) {
                 const close = document.createElement('button');
@@ -604,6 +731,17 @@ export class Visual implements IVisual {
                 properties: {
                     showFilterJson: this.showFilterJsonVisible,
                     showLog: this.showLogVisible
+                }
+            });
+        } else if (options.objectName === 'limits') {
+            instances.push({
+                objectName: 'limits',
+                selector: undefined,
+                properties: {
+                    allowMeasureChip: this.allowMeasureChip,
+                    maxQueryLength: this.maxQueryLength,
+                    maxTokens: this.maxTokens,
+                    maxClauses: this.maxClauses
                 }
             });
         }
